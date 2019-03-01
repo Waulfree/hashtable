@@ -112,7 +112,7 @@ static inline void hash_table_clean(struct hash_table* ht)
 //Insert callbacks down there to support more hashing methods, or try overloading
 void hash_table_resize(struct hash_table* ht);
 
-struct pair* hash_table_search(struct hash_table* ht, const void* key)
+static inline sstruct pair* hash_table_search(struct hash_table* ht, const void* key)
 {
     arch_t idx = (arch_strhash(key) ^ ht->hashseed) % ht->size;
     struct pair* p = &ht->pairs[idx];
@@ -147,14 +147,14 @@ struct pair* hash_table_insert(struct hash_table* ht, struct pair cur)
     }
 }
 
-struct pair* hash_table_remove(struct hash_table* ht, const void* key)
+static inline struct pair* hash_table_remove(struct hash_table* ht, const void* key)
 {
     struct pair* p = hash_table_search(ht, key);
     if (p) p->status = PAIR_FREE;
     return p;
 }
 
-void hash_table_resize(struct hash_table* ht)
+static inline void hash_table_resize(struct hash_table* ht)
 {
     struct pair* p = ht->pairs;
     struct hash_table new;
@@ -168,7 +168,7 @@ void hash_table_resize(struct hash_table* ht)
     *ht = new;  
 }
 
-struct hash_table* new_hash_table(arch_t size, arch_t maxpairs)
+static inline struct hash_table* new_hash_table(arch_t size, arch_t maxpairs)
 {
     struct hash_table* ht = cast(
         struct hash_table*,
