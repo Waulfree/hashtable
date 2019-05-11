@@ -17,115 +17,135 @@
 
 #include "arch.h"
 
-enum pair_status {
-    PAIR_RESERVED = cast(arch_t, -3),
-    PAIR_REMOVED,
-    PAIR_FREE
-};
+enum hash_pair_status {PAIR_FREE = cast(arch_t, -2), PAIR_REMOVED};
+enum hash_pair_dist {DIST_IDEAL = cast(arch_t, 0)};
 
-enum pair_dist {
-    DIST_IDEAL = cast(arch_t, 0)
-};
+//Be free to change types :)
+typedef const char* pair_key_t;
+typedef const void* pair_val_t;
 
 struct pair {
-    const void *key, *val;
+    pair_key_t key;
+    pair_val_t val;
+};
+
+struct hash_pair {
+    union {
+        struct pair pair;
+        struct {
+	    pair_key_t key;
+	    pair_val_t val;
+	};
+    };
     union {
         arch_t status, dist;
     };
 };
 
-static inline struct pair pair_init(const void* key, const void* val)
-{
-    //C-style cast warning!
-    return (struct pair){key, val, {0}};
-}
-
 struct hash_table {
-    struct pair* pairs;
+    struct hash_pair* pairs;
     arch_t  size, totalsize,
         maxpairs, maxprobes,
         numpairs, hashseed;
 };
+
+static inline struct pair pair_init(pair_key_t key, pair_val_t val)
+{
+    return (struct pair){key, val}; //C-style cast warning!
+}
+
+static inline struct hash_pair hash_pair_init(pair_key_t key, pair_val_t val)
+{
+    return (struct hash_pair){{{key, val}}, {0}}; //C-style cast warning!
+}
+
+static inline void hash_table_pairs_alloc(struct hash_table* ht, arch_t size)
+{
+    ht->pairs = cast(struct hash_pair*, malloc(size * sizeof(struct hash_pair)));
+}
+
+static inline void hash_table_pairs_free(struct hash_table* ht)
+{
+    free(ht->pairs);
+}
+
+static inline arch_t hash_table_key_index(struct hash_table* ht, pair_key_t key)
+{
+    return (arch_strhash(key) + ht->hashseed) % ht->size;
+}
+
+static inline bool hash_key_cmp(pair_key_t a, pair_key_t b)
+{
+    return !arch_strcmp(a, b);
+}
 
 static inline struct hash_table hash_table_init(arch_t size, arch_t maxpairs)
 {
     struct hash_table ht;
     arch_t maxprobes = arch_ilog2(size),
            totalsize = size + maxprobes;
-    
-    ht.pairs = cast(
-        struct pair*,
-        malloc(totalsize * sizeof(struct pair)));
+
+    hash_table_pairs_alloc(&ht, totalsize);
     ht.size = size, ht.totalsize = totalsize,
     ht.maxpairs = maxpairs, ht.maxprobes = maxprobes,
     ht.numpairs = 0, ht.hashseed = arch_rand();
     
-    for (arch_t i = 0; i < totalsize; i++){
-         ht.pairs[i].status = PAIR_FREE;}
+    for (arch_t i = 0; i < totalsize; i++) 
+	ht.pairs[i].status = PAIR_FREE;;
     
-    return ht;
+    return ht;	
 }
 
-static inline void hash_table_clean(struct hash_table* ht)
+struct pair* hash_table_search(struct hash_table* ht, pair_key_t key)
 {
-    free(ht->pairs);
-    //ht->pairs = NULL;
-}
-
-//Insert callbacks down there to support more hashing methods, or try overloading
-static inline void hash_table_resize(struct hash_table* ht);
-
-struct pair* hash_table_search(struct hash_table* ht, const void* key)
-{
-    arch_t idx = (arch_strhash(key) ^ ht->hashseed) % ht->size;
-    struct pair* p = &ht->pairs[idx];
+    arch_t idx = hash_table_key_index(ht, key);
+    struct hash_pair* p = &ht->pairs[idx];
     
-    for (arch_t dist = 0; dist < ht->maxprobes; dist++, p++)
-        if (p->dist == dist) 
-            if (!arch_strcmp(p->key, key)) return p;
+    for (arch_t dist = 0; dist < ht->maxprobes && p->status != PAIR_FREE; dist++, p++)
+        if ((p->dist == dist) && hash_key_cmp(p->key, key)) return cast(struct pair*, p);
+        
     return NULL;
 }
 
+static inline void hash_table_resize(struct hash_table* );
 static inline struct pair* hash_table_insert(struct hash_table* ht, struct pair cur)
 {
-    if (ht->numpairs >= ht->maxpairs) hash_table_resize(ht);
-    begin:;
-    arch_t idx = (arch_strhash(cur.key) ^ ht->hashseed) % ht->size;
-    struct pair* p = &ht->pairs[idx];
+    while (true) {
+        arch_t idx = hash_table_key_index(ht, cur.key);
+        struct hash_pair* p = &ht->pairs[idx];
     
-    for (;; p++, cur.dist++) {
-        if (p->status == PAIR_FREE) {
-              *p = cur, ht->numpairs++;
-              return p;
-        } else if (p->dist > cur.dist) {
-            struct pair buf = *p;
-            *p = cur, cur = buf; //robin hood swap
-        } if (cur.dist >= ht->maxprobes) {
-            hash_table_resize(ht);
-            cur.dist = DIST_IDEAL;
-            goto begin;
-        } else if (p->dist == cur.dist) //check if key already exist
-            if (!arch_strcmp(p->key, cur.key)) {p->val = cur.val; return p;}
+        for (arch_t dist = DIST_IDEAL; dist < ht->maxprobes; dist++, p++) {
+            if (p->status >= PAIR_FREE) {
+        	p->pair = cur, p->dist = dist, ht->numpairs++;
+                return cast(struct pair*, p);
+    	    } else if (p->dist > dist) {
+                struct hash_pair buf = *p; //Robin Hood swap
+                p->pair = cur, p->dist = dist,
+                cur = buf.pair, dist = buf.dist;
+            } else if (p->dist == dist && hash_key_cmp(p->key, cur.key)) {
+        	p->val = cur.val;
+        	return cast(struct pair*, p);
+	    }
+        }
+        
+        hash_table_resize(ht);
     }
 }
 
-static inline struct pair* hash_table_remove(struct hash_table* ht, const void* key)
+static inline struct pair* hash_table_remove(struct hash_table* ht, pair_key_t key)
 {
-    struct pair* p = hash_table_search(ht, key);
-    if (p) p->status = PAIR_FREE;
-    return p;
+    struct hash_pair* p = cast(struct hash_pair*, hash_table_search(ht, key));
+    if (p) p->status = PAIR_REMOVED, ht->numpairs--;
+    return cast(struct pair*, p);
 }
 
 static inline void hash_table_resize(struct hash_table* ht)
 {
-    struct pair* p = ht->pairs;
+    struct hash_pair* p = ht->pairs;
     struct hash_table newht = hash_table_init(ht->size * 2, ht->maxpairs * 2);
-    for (struct pair* end = p + ht->totalsize; p < end; p++)
-        if (p->status != PAIR_FREE) {
-            p->dist = DIST_IDEAL;
-            hash_table_insert(&newht, *p);
-        }
-    hash_table_clean(ht);
+    for (struct hash_pair* end = p + ht->totalsize; p < end; p++)
+        if (p->status < PAIR_FREE) hash_table_insert(&newht, *cast(struct pair*, p));
+    hash_table_pairs_free(ht);
     *ht = newht;  
 }
 
@@ -140,8 +160,8 @@ static inline struct hash_table* new_hash_table(arch_t size, arch_t maxpairs)
 
 static inline void free_hash_table(struct hash_table* ht)
 {
-    hash_table_clean(ht);
-    free(ht);//, ht = NULL;
+    hash_table_pairs_free(ht);
+    free(ht);
 }
 
 #endif
